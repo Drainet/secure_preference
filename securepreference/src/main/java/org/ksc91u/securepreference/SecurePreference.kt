@@ -9,6 +9,7 @@ import android.os.Build
 import android.security.KeyPairGeneratorSpec
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
+import android.security.keystore.UserNotAuthenticatedException
 import android.util.Base64
 import android.widget.Toast
 import androidx.annotation.RequiresApi
@@ -220,27 +221,36 @@ class SecurePreference(
     fun encryptWithBiometrics(
         clearTextBytes: ByteArray
     ): Single<Pair<ByteArray, ByteArray>> {
-        if (secretKey == null) {
-            Toast.makeText(activity, "Run initBiometrics first", Toast.LENGTH_LONG).show()
-            return Single.error(IllegalStateException("Run initBiometrics first"))
-        }
-        val cipher = Cipher.getInstance(
-            symmetricEncryption + "/"
-                    + symmetricBlockMode + "/"
-                    + symmetricPadding
-        )
-            .apply {
-                init(Cipher.ENCRYPT_MODE, secretKey)
+        return Single.create<BiometricPrompt.CryptoObject> { singleEmitter ->
+            if (secretKey == null) {
+                Toast.makeText(activity, "Run initBiometrics first", Toast.LENGTH_LONG).show()
+                singleEmitter.onError(IllegalStateException("Run initBiometrics first"))
+                return@create
             }
-        val cryptoObject = BiometricPrompt.CryptoObject(cipher)
-        return RxBiometricBuilder()
-            .title("Encrypt")
-            .description("Encrypt")
-            .negativeButtonText("cancel")
-            .negativeButtonListener(DialogInterface.OnClickListener { p0, p1 ->
-            })
-            .build()
-            .authenticate(activity, cryptoObject)
+            try {
+                val cipher =
+                    Cipher.getInstance(
+                        symmetricEncryption + "/"
+                                + symmetricBlockMode + "/"
+                                + symmetricPadding
+                    ).apply {
+                        init(Cipher.ENCRYPT_MODE, secretKey)
+                    }
+                singleEmitter.onSuccess(BiometricPrompt.CryptoObject(cipher))
+            } catch (e: UserNotAuthenticatedException) {
+                singleEmitter.onError(e)
+            }
+        }
+            .flatMap { cryptoObject ->
+                RxBiometricBuilder()
+                    .title("Encrypt")
+                    .description("Encrypt")
+                    .negativeButtonText("cancel")
+                    .negativeButtonListener(DialogInterface.OnClickListener { p0, p1 ->
+                    })
+                    .build()
+                    .authenticate(activity, cryptoObject)
+            }
             .observeOn(AndroidSchedulers.mainThread())
             .map { authResult ->
                 if (authResult.cryptoObject == null) {
@@ -258,34 +268,47 @@ class SecurePreference(
     fun decryptWithBiometrics(
         encryptTextAndIv: Pair<ByteArray, ByteArray>
     ): Single<ByteArray> {
-        if (secretKey == null) {
-            Toast.makeText(activity, "Run initBiometrics first", Toast.LENGTH_LONG).show()
-            return Single.error(IllegalStateException("Run initBiometrics first"))
-        }
-        val cipher = Cipher.getInstance(
-            symmetricEncryption + "/"
-                    + symmetricBlockMode + "/"
-                    + symmetricPadding
-        )
-            .apply {
-                //https://stackoverflow.com/questions/33995233/android-aes-encryption-decryption-using-gcm-mode-in-android
-                if (symmetricBlockMode == "GCM") {
-                    init(Cipher.DECRYPT_MODE, secretKey, GCMParameterSpec(128, encryptTextAndIv.second))
-                } else if (symmetricBlockMode == "ECB") {
-                    init(Cipher.DECRYPT_MODE, secretKey)
-                } else {
-                    init(Cipher.DECRYPT_MODE, secretKey, IvParameterSpec(encryptTextAndIv.second))
-                }
+        return Single.create<BiometricPrompt.CryptoObject> { singleEmitter ->
+            if (secretKey == null) {
+                Toast.makeText(activity, "Run initBiometrics first", Toast.LENGTH_LONG).show()
+                singleEmitter.onError(IllegalStateException("Run initBiometrics first"))
+                return@create
             }
-        val cryptoObject = BiometricPrompt.CryptoObject(cipher)
-        return RxBiometricBuilder()
-            .title("Decrypt")
-            .description("Decrypt")
-            .negativeButtonText("cancel")
-            .negativeButtonListener(DialogInterface.OnClickListener { p0, p1 ->
-            })
-            .build()
-            .authenticate(activity, cryptoObject)
+            try {
+                val cipher = Cipher.getInstance(
+                    symmetricEncryption + "/"
+                            + symmetricBlockMode + "/"
+                            + symmetricPadding
+                )
+                    .apply {
+
+                        //https://stackoverflow.com/questions/33995233/android-aes-encryption-decryption-using-gcm-mode-in-android
+                        when (symmetricBlockMode) {
+                            "GCM" -> init(
+                                Cipher.DECRYPT_MODE,
+                                secretKey,
+                                GCMParameterSpec(128, encryptTextAndIv.second)
+                            )
+                            "ECB" -> init(Cipher.DECRYPT_MODE, secretKey)
+                            else -> init(Cipher.DECRYPT_MODE, secretKey, IvParameterSpec(encryptTextAndIv.second))
+                        }
+
+                    }
+                singleEmitter.onSuccess(BiometricPrompt.CryptoObject(cipher))
+            } catch (e: UserNotAuthenticatedException) {
+                singleEmitter.onError(e)
+            }
+        }
+            .flatMap { cryptoObject ->
+                RxBiometricBuilder()
+                    .title("Decrypt")
+                    .description("Decrypt")
+                    .negativeButtonText("cancel")
+                    .negativeButtonListener(DialogInterface.OnClickListener { p0, p1 ->
+                    })
+                    .build()
+                    .authenticate(activity, cryptoObject)
+            }
             .observeOn(AndroidSchedulers.mainThread())
             .map { authResult ->
                 if (authResult.cryptoObject == null) {
@@ -307,9 +330,9 @@ class SecurePreference(
             secretKey = getSymmetricKey(nameSpace)
             return true
         } else {
-            if(keyguardManager?.isKeyguardSecure == true) {
+            if (keyguardManager?.isKeyguardSecure == true) {
                 throw java.lang.IllegalStateException("No biometric support")
-            }else{
+            } else {
                 throw java.lang.SecurityException("Enroll fingerprint first")
             }
         }
